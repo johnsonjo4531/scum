@@ -1,3 +1,4 @@
+use bevy::picking::Pickable;
 use bevy::prelude::*;
 use itertools::Itertools;
 use rand::prelude::*;
@@ -559,6 +560,7 @@ fn pass_button() -> impl Scene {
                     font_size: FontSize::Px(22.),
                 }
                 TextColor({cream_color()})
+                Pickable::IGNORE
             )
         ]
     }
@@ -1484,8 +1486,15 @@ fn main() {
 mod tests {
     use super::*;
     use bevy::asset::AssetPlugin;
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::{
+        backend::HitData,
+        events::{Click, Pointer},
+        pointer::{Location, PointerId},
+    };
     use bevy::scene::ScenePlugin;
     use bevy::state::app::StatesPlugin;
+    use std::time::Duration;
 
     fn make_app() -> App {
         let mut app = App::new();
@@ -1970,5 +1979,82 @@ mod tests {
         }
         assert!(app.world().resource::<Game>().trick_rank.is_some());
         assert_eq!(app.world().resource::<Game>().active_player, 3);
+    }
+
+    fn find_entity<M: Component>(app: &mut App) -> Option<Entity> {
+        let world = app.world_mut();
+        let query = world.query_filtered::<Entity, With<M>>();
+        query.iter_manual(world).next()
+    }
+
+    fn wait_for_entity<M: Component>(app: &mut App) -> Entity {
+        let mut guard = 0;
+        loop {
+            if let Some(entity) = find_entity::<M>(app) {
+                return entity;
+            }
+            app.update();
+            guard += 1;
+            assert!(guard < 120, "Expected the entity to spawn");
+        }
+    }
+
+    fn child_of(app: &mut App, parent: Entity) -> Option<Entity> {
+        let world = app.world_mut();
+        let query = world.query::<(Entity, &ChildOf)>();
+        query
+            .iter_manual(world)
+            .find(|(_, child)| child.parent() == parent)
+            .map(|(entity, _)| entity)
+    }
+
+    fn click_entity(app: &mut App, entity: Entity) {
+        let hit = HitData::new(Entity::PLACEHOLDER, 0., None, None);
+        let click = Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::None {
+                    width: 1,
+                    height: 1,
+                },
+                position: Vec2::ZERO,
+            },
+            Click {
+                button: PointerButton::Primary,
+                hit,
+                duration: Duration::ZERO,
+                count: 1,
+            },
+            entity,
+        );
+        app.world_mut()
+            .resource_mut::<Messages<Pointer<Click>>>()
+            .write(click);
+    }
+
+    #[test]
+    fn pass_button_label_does_not_swallow_clicks() {
+        let mut app = make_app();
+        let button = wait_for_entity::<PassButton>(&mut app);
+
+        // The button label sits above the button in the picking order, so it
+        // must be ignored by picking or clicks on the text never reach the
+        // button entity.
+        let label = child_of(&mut app, button).expect("Expected the PASS label");
+        let pickable = app.world().get::<Pickable>(label).expect("Expected the label to be explicitly non-pickable");
+        assert!(!pickable.is_hoverable);
+        assert!(!pickable.should_block_lower);
+
+        press_space(&mut app);
+        wait_for_turn(&mut app);
+        app.world_mut().resource_mut::<Game>().active_player = 1;
+
+        // A pointer click targeting the button entity registers as a pass.
+        click_entity(&mut app, button);
+        app.update();
+
+        let game = app.world().resource::<Game>();
+        assert_eq!(game.passes, 1);
+        assert!(game.message.contains("You passed"));
     }
 }
